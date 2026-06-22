@@ -62,7 +62,11 @@ def archive_dormant_projects(
         try:
             archive_project(info.name, config, dry_run=dry_run, transfer=transfer)
             results.append(ActionResult(info.name, "ok", info.size_bytes))
+            if transfer and not dry_run:
+                transfer._line.clear(f"  + {info.name}  ({_fmt(info.size_bytes)})")
         except StorageCleanError as e:
+            if transfer and not dry_run:
+                transfer._line.clear(f"  - {info.name}  (skipped)")
             detail = str(e).split(": ", 1)[-1] if ": " in str(e) else str(e)
             results.append(ActionResult(info.name, "skip", info.size_bytes, detail))
 

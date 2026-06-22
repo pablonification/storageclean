@@ -125,15 +125,11 @@ def cmd_archive(args: argparse.Namespace) -> int:
             print("Error: provide a project name or use --dormant", file=sys.stderr)
             return 1
 
-        label = "Previewing" if args.dry_run else "Archiving"
-        transfer = TransferProgress(label, item=args.project)
-        result = archive_project(
-            args.project,
-            config,
-            dry_run=args.dry_run,
-            transfer=transfer if not args.dry_run else None,
-        )
-        if not args.dry_run:
+        if args.dry_run:
+            result = archive_project(args.project, config, dry_run=True)
+        else:
+            transfer = TransferProgress("Archiving", item=args.project)
+            result = archive_project(args.project, config, transfer=transfer)
             transfer.close()
 
         verb = "Would archive" if args.dry_run else "Archived"

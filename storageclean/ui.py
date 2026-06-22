@@ -1,13 +1,79 @@
 from __future__ import annotations
 
+import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .scanner import format_bytes
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_CLEAR = "\033[2K\r"
+
+
+def _live_capable(stream) -> bool:
+    if os.environ.get("SC_NO_PROGRESS") == "1":
+        return False
+    if os.environ.get("SC_FORCE_PROGRESS") == "1":
+        return True
+    return stream.isatty() and os.environ.get("TERM", "dumb") != "dumb"
+
+
+def _bar(pct: float, width: int = 20) -> str:
+    pct = max(0.0, min(1.0, pct))
+    filled = int(width * pct)
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+class LiveLine:
+    """Single-line live status with safe clear + throttling."""
+
+    def __init__(self, stream=None) -> None:
+        self.stream = stream or sys.stderr
+        self._live = _live_capable(self.stream)
+        self._active = False
+        self._last_draw = 0.0
+        self._last_plain_pct = -1
+        self._min_interval = 0.12
+
+    def show(self, text: str, *, pct: float | None = None, force: bool = False) -> None:
+        if self._live:
+            now = time.monotonic()
+            if not force and pct is not None:
+                if pct < 1.0 and (now - self._last_draw) < self._min_interval:
+                    return
+                if pct < 1.0 and self._last_plain_pct >= 0:
+                    if int(pct * 100) == int(self._last_plain_pct * 100):
+                        return
+            self._last_draw = now
+            if pct is not None:
+                self._last_plain_pct = pct
+            self.stream.write(_CLEAR + text)
+            self.stream.flush()
+            self._active = True
+            return
+
+        if force or pct is None or pct >= 1.0 or pct == 0.0:
+            self.stream.write(text + "\n")
+            self.stream.flush()
+            return
+
+        step = int(pct * 4)  # 0%, 25%, 50%, 75%
+        if step > self._last_plain_pct:
+            self._last_plain_pct = step
+            self.stream.write(text + "\n")
+            self.stream.flush()
+
+    def clear(self, final: str | None = None) -> None:
+        if self._active and self._live:
+            self.stream.write(_CLEAR)
+            self._active = False
+        if final:
+            self.stream.write(final + "\n")
+        self.stream.flush()
+        self._last_plain_pct = -1
 
 
 def visible_len(text: str) -> int:
@@ -67,42 +133,27 @@ def short_path(path: Path | str) -> str:
 
 
 class Progress:
-    """Simple count-based progress bar written to stderr."""
+    """Count-based progress for scan/preview operations."""
 
     def __init__(self, total: int, label: str = "Working") -> None:
         self.total = max(total, 1)
         self.label = label
         self.current = 0
-        self._tty = sys.stderr.isatty()
-        self._last_msg = ""
+        self._item = ""
+        self._line = LiveLine()
 
     def update(self, current: int, item: str = "") -> None:
         self.current = current
-        self._last_msg = item
-        if self._tty:
-            self._draw()
-        elif current == 1 or current == self.total or current % 5 == 0:
-            sys.stderr.write(f"{self.label}: {current}/{self.total} {item}\n")
-            sys.stderr.flush()
-
-    def _draw(self) -> None:
-        pct = self.current / self.total
-        width = 28
-        filled = int(width * pct)
-        bar = "█" * filled + "░" * (width - filled)
-        item = (self._last_msg[:36] + "…") if len(self._last_msg) > 37 else self._last_msg
-        line = f"\r{dim(self.label)} [{bar}] {self.current}/{self.total}"
-        if item:
-            line += f"  {item}"
-        sys.stderr.write(line.ljust(96))
-        sys.stderr.flush()
+        self._item = item
+        pct = current / self.total
+        short = (item[:30] + "…") if len(item) > 31 else item
+        text = f"{self.label} {_bar(pct)} {current}/{self.total}"
+        if short:
+            text += f"  {short}"
+        self._line.show(text, pct=pct, force=(current == self.total))
 
     def close(self, done_msg: str = "") -> None:
-        if self._tty:
-            sys.stderr.write("\r" + " " * 96 + "\r")
-        if done_msg:
-            sys.stderr.write(done_msg + "\n")
-        sys.stderr.flush()
+        self._line.clear(done_msg or None)
 
 
 class TransferProgress:
@@ -123,15 +174,14 @@ class TransferProgress:
         self.copied = 0
         self.total = 1
         self._file = ""
-        self._tty = sys.stderr.isatty()
-        self._last_pct_step = -1
+        self._line = LiveLine()
 
     def set_item(self, name: str) -> None:
         self.item = name
         self.copied = 0
         self.total = 1
         self._file = ""
-        self._last_pct_step = -1
+        self._line._last_plain_pct = -1
 
     def set_batch(self, current: int, total: int) -> None:
         self.batch_current = current
@@ -141,56 +191,31 @@ class TransferProgress:
         self.copied = copied
         self.total = max(total, 1)
         self._file = current_file
-        if self._tty:
-            self._draw_tty()
-        else:
-            pct_step = int((copied / self.total) * 10)
-            if pct_step > self._last_pct_step or current_file in {"done", "starting", "moving"}:
-                self._last_pct_step = pct_step
-                self._draw_plain()
+        pct = min(1.0, copied / self.total)
+        force = current_file in {"done", "moving"} or pct >= 1.0 or copied == 0
+        self._line.show(self._format_line(), pct=pct, force=force)
 
     def _prefix(self) -> str:
         parts = [self.label]
         if self.batch_current is not None and self.batch_total is not None:
-            parts.append(f"{self.batch_current}/{self.batch_total}")
+            parts.append(f"({self.batch_current}/{self.batch_total})")
         if self.item:
-            parts.append(f"· {self.item}")
+            parts.append(self.item)
         return " ".join(parts)
 
-    def _short_file(self) -> str:
-        if not self._file or self._file in {"done", "starting", "moving"}:
-            return self._file
-        name = Path(self._file).name
-        if len(name) > 32:
-            return name[:29] + "…"
-        return name
-
-    def _draw_tty(self) -> None:
+    def _format_line(self) -> str:
         pct = min(1.0, self.copied / self.total)
-        width = 24
-        filled = int(width * pct)
-        bar = "█" * filled + "░" * (width - filled)
-        size = f"{format_bytes(self.copied)}/{format_bytes(self.total)}"
-        line = f"\r{dim(self._prefix())} [{bar}] {size}"
-        short = self._short_file()
-        if short and short not in {"done"}:
-            line += f"  {dim(short)}"
-        sys.stderr.write(line.ljust(96))
-        sys.stderr.flush()
-
-    def _draw_plain(self) -> None:
-        pct = int(min(100, (self.copied / self.total) * 100))
-        msg = f"{self._prefix()}  {pct:>3}%  {format_bytes(self.copied)}/{format_bytes(self.total)}"
-        short = self._short_file()
-        if short:
-            msg += f"  {short}"
-        sys.stderr.write(msg + "\n")
-        sys.stderr.flush()
+        size = f"{format_bytes(self.copied)} / {format_bytes(self.total)}"
+        text = f"{self._prefix()}  {_bar(pct)}  {size}"
+        if self._file and self._file not in {"done", "starting", "moving"}:
+            name = Path(self._file).name
+            if len(name) > 28:
+                name = name[:25] + "..."
+            text += f"  {name}"
+        return text
 
     def close(self) -> None:
-        if self._tty:
-            sys.stderr.write("\r" + " " * 96 + "\r")
-        sys.stderr.flush()
+        self._line.clear()
 
 
 @dataclass

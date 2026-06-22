@@ -48,8 +48,8 @@ def move_tree_with_progress(
         _report(progress, on_bytes, 0, 0, "done")
         return 0
 
-    def report(copied: int, rel: str) -> None:
-        _report(progress, on_bytes, copied, total, rel)
+    def report(copied: int, rel: str, *, force: bool = False) -> None:
+        _report(progress, on_bytes, copied, total, rel, force=force)
 
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -61,17 +61,22 @@ def move_tree_with_progress(
         return total
 
     copied = 0
-    report(0, "starting")
+    report(0, "", force=True)
+    last_reported = 0
+    min_step = max(256 * 1024, total // 200)  # ~200 updates max per project
+
     for file_path, size in _iter_files(src):
         rel = file_path.relative_to(src)
         target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file_path, target)
         copied += size
-        report(copied, str(rel))
+        if copied - last_reported >= min_step or copied == total:
+            report(copied, str(rel))
+            last_reported = copied
 
     shutil.rmtree(src)
-    report(total, "done")
+    report(total, "done", force=True)
     return total
 
 
@@ -81,8 +86,15 @@ def _report(
     copied: int,
     total: int,
     rel: str,
+    *,
+    force: bool = False,
 ) -> None:
     if progress is not None:
-        progress.update(copied, total, rel)
+        if force and rel == "done":
+            progress.update(copied, total, "done")
+        elif force and rel in {"", "moving"}:
+            progress.update(copied, total, rel or "moving")
+        else:
+            progress.update(copied, total, rel)
     if on_bytes is not None:
         on_bytes(copied, total, rel)
