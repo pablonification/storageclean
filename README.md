@@ -23,7 +23,9 @@ storageclean scan            # see all projects, sizes, caches, dormant status
 storageclean scan --sync     # scan + update registry
 
 storageclean pin draftanakitb-web   # keep active project local
-storageclean archive RekSTI         # move to SSD, symlink stays in ~/Documents/coding
+storageclean archive RekSTI         # move one project to SSD
+storageclean archive --dormant      # batch: archive all dormant projects
+storageclean archive --dormant --dry-run
 storageclean restore RekSTI         # bring back to internal disk
 
 storageclean clean --dry-run        # preview cache cleanup across all projects

@@ -10,6 +10,7 @@ from . import __version__
 from .config import CACHE_TARGETS, Config, Registry
 from .operations import (
     StorageCleanError,
+    archive_dormant_projects,
     archive_project,
     clean_caches,
     clean_global_caches,
@@ -73,10 +74,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if dormant:
         print()
         cli = _cli_name()
-        print(f"💤 {len(dormant)} dormant project(s) (>{config.dormant_days}d inactive). Archive or clean caches:")
-        for p in dormant[:10]:
-            print(f"   {cli} archive {p.name}")
-            print(f"   {cli} clean --project {p.name} --dry-run")
+        dormant_size = sum(p.size_bytes for p in dormant)
+        print(
+            f"💤 {len(dormant)} dormant project(s) (>{config.dormant_days}d inactive), "
+            f"{format_bytes(dormant_size)} total:"
+        )
+        print(f"   {cli} archive --dormant --dry-run")
+        print(f"   {cli} clean --dormant --dry-run")
 
     return 0
 
@@ -101,8 +105,15 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_archive(args: argparse.Namespace) -> int:
     config = Config.load()
     try:
-        msg = archive_project(args.project, config, dry_run=args.dry_run)
-        print(msg)
+        if args.dormant:
+            logs = archive_dormant_projects(config, dry_run=args.dry_run)
+            for line in logs:
+                print(line)
+            return 0
+        if not args.project:
+            print("Error: provide a project name or use --dormant", file=sys.stderr)
+            return 1
+        print(archive_project(args.project, config, dry_run=args.dry_run))
         return 0
     except StorageCleanError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -200,8 +211,12 @@ def build_parser() -> argparse.ArgumentParser:
     list_p.add_argument("--dormant", action="store_true", help="Only dormant projects")
     list_p.add_argument("--archived", action="store_true", help="Only archived (symlinked) projects")
 
-    arch_p = sub.add_parser("archive", help="Move project to SSD and leave a symlink")
-    arch_p.add_argument("project", help="Project folder name")
+    arch_p = sub.add_parser("archive", help="Move project(s) to SSD and leave symlinks")
+    arch_p.add_argument("project", nargs="?", help="Project folder name (omit with --dormant)")
+    arch_p.add_argument(
+        "--dormant", action="store_true",
+        help="Archive all dormant projects (batch)",
+    )
     arch_p.add_argument("--dry-run", action="store_true", help="Preview without moving")
 
     rest_p = sub.add_parser("restore", help="Bring archived project back to local disk")
