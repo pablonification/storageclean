@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from .scanner import format_bytes
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def visible_len(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def _pad_cell(cell: str, width: int, align: str) -> str:
+    pad = max(0, width - visible_len(cell))
+    if align == ">":
+        return " " * pad + cell
+    if align == "^":
+        left = pad // 2
+        return " " * left + cell + " " * (pad - left)
+    return cell + " " * pad
 
 
 def use_color() -> bool:
@@ -128,27 +145,30 @@ def _status_icon(result: ActionResult) -> str:
     return red("✗")
 
 
-def print_table(headers: list[str], rows: list[list[str]], aligns: list[str] | None = None) -> None:
+def print_table(
+    headers: list[str],
+    rows: list[list[str]],
+    aligns: list[str] | None = None,
+    *,
+    gap: int = 2,
+) -> None:
     aligns = aligns or ["<"] * len(headers)
-    widths = [len(h) for h in headers]
+    widths = [visible_len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
+            if i < len(widths):
+                widths[i] = max(widths[i], visible_len(cell))
 
-    def fmt_row(cells: list[str]) -> str:
-        parts = []
-        for i, cell in enumerate(cells):
-            w = widths[i]
-            if aligns[i] == ">":
-                parts.append(cell.rjust(w))
-            else:
-                parts.append(cell.ljust(w))
-        return "  ".join(parts)
+    sep = " " * gap
 
-    print(fmt_row([bold(h) for h in headers]))
-    print(dim("  ".join("─" * w for w in widths)))
+    print(sep.join(_pad_cell(bold(h), widths[i], aligns[i]) for i, h in enumerate(headers)))
+    print(dim(sep.join("─" * w for w in widths)))
     for row in rows:
-        print(fmt_row(row))
+        print(sep.join(
+            _pad_cell(cell, widths[i], aligns[i])
+            for i, cell in enumerate(row)
+            if i < len(widths)
+        ))
 
 
 def render_batch_report(report: BatchReport) -> None:
