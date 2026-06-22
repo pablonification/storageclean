@@ -5,7 +5,8 @@ from pathlib import Path
 
 from .config import CACHE_TARGETS, Config, Registry, archive_mounted, is_protected
 from .scanner import ProjectInfo, dir_size, find_cache_dirs, scan_workspace
-from .ui import ActionResult, BatchReport, CleanEntry, CleanReport
+from .transfer import move_tree_with_progress
+from .ui import ActionResult, BatchReport, CleanEntry, CleanReport, TransferProgress
 
 
 class StorageCleanError(Exception):
@@ -38,6 +39,7 @@ def archive_dormant_projects(
     dry_run: bool = False,
     on_progress=None,
     dormant: list[ProjectInfo] | None = None,
+    transfer: TransferProgress | None = None,
 ) -> BatchReport:
     if dormant is None:
         dormant = dormant_projects(config)
@@ -52,10 +54,13 @@ def archive_dormant_projects(
     total = len(dormant)
 
     for i, info in enumerate(dormant, 1):
-        if on_progress:
+        if transfer:
+            transfer.set_batch(i, total)
+            transfer.set_item(info.name)
+        elif on_progress:
             on_progress(i, total, info.name)
         try:
-            archive_project(info.name, config, dry_run=dry_run)
+            archive_project(info.name, config, dry_run=dry_run, transfer=transfer)
             results.append(ActionResult(info.name, "ok", info.size_bytes))
         except StorageCleanError as e:
             detail = str(e).split(": ", 1)[-1] if ": " in str(e) else str(e)
@@ -65,7 +70,13 @@ def archive_dormant_projects(
     return BatchReport(title, results, dry_run=dry_run)
 
 
-def archive_project(name: str, config: Config, *, dry_run: bool = False) -> ActionResult:
+def archive_project(
+    name: str,
+    config: Config,
+    *,
+    dry_run: bool = False,
+    transfer: TransferProgress | None = None,
+) -> ActionResult:
     if is_protected(name):
         raise StorageCleanError(
             f"Cannot archive {name}: protected project (storageclean must stay local)."
@@ -88,12 +99,18 @@ def archive_project(name: str, config: Config, *, dry_run: bool = False) -> Acti
         return ActionResult(name, "ok", size)
 
     size = dir_size(src)
-    shutil.move(str(src), str(dst))
+    move_tree_with_progress(src, dst, progress=transfer)
     src.symlink_to(dst)
     return ActionResult(name, "ok", size)
 
 
-def restore_project(name: str, config: Config, *, dry_run: bool = False) -> ActionResult:
+def restore_project(
+    name: str,
+    config: Config,
+    *,
+    dry_run: bool = False,
+    transfer: TransferProgress | None = None,
+) -> ActionResult:
     _require_archive(config)
     workspace = config.workspace_path
     link = workspace / name
@@ -105,14 +122,14 @@ def restore_project(name: str, config: Config, *, dry_run: bool = False) -> Acti
         if dry_run:
             return ActionResult(name, "ok", size, "remove symlink, move back")
         link.unlink()
-        shutil.move(str(target), str(link))
+        move_tree_with_progress(target, link, progress=transfer)
         return ActionResult(name, "ok", size)
 
     if archived.exists() and not link.exists():
         size = dir_size(archived)
         if dry_run:
             return ActionResult(name, "ok", size)
-        shutil.move(str(archived), str(link))
+        move_tree_with_progress(archived, link, progress=transfer)
         return ActionResult(name, "ok", size)
 
     raise StorageCleanError(f"Cannot restore {name}: not archived or not found.")

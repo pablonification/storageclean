@@ -67,7 +67,7 @@ def short_path(path: Path | str) -> str:
 
 
 class Progress:
-    """Simple progress bar written to stderr."""
+    """Simple count-based progress bar written to stderr."""
 
     def __init__(self, total: int, label: str = "Working") -> None:
         self.total = max(total, 1)
@@ -94,14 +94,102 @@ class Progress:
         line = f"\r{dim(self.label)} [{bar}] {self.current}/{self.total}"
         if item:
             line += f"  {item}"
-        sys.stderr.write(line.ljust(80))
+        sys.stderr.write(line.ljust(96))
         sys.stderr.flush()
 
     def close(self, done_msg: str = "") -> None:
         if self._tty:
-            sys.stderr.write("\r" + " " * 80 + "\r")
+            sys.stderr.write("\r" + " " * 96 + "\r")
         if done_msg:
             sys.stderr.write(done_msg + "\n")
+        sys.stderr.flush()
+
+
+class TransferProgress:
+    """Byte-level transfer progress for archive/restore operations."""
+
+    def __init__(
+        self,
+        label: str = "Archiving",
+        *,
+        item: str = "",
+        batch_current: int | None = None,
+        batch_total: int | None = None,
+    ) -> None:
+        self.label = label
+        self.item = item
+        self.batch_current = batch_current
+        self.batch_total = batch_total
+        self.copied = 0
+        self.total = 1
+        self._file = ""
+        self._tty = sys.stderr.isatty()
+        self._last_pct_step = -1
+
+    def set_item(self, name: str) -> None:
+        self.item = name
+        self.copied = 0
+        self.total = 1
+        self._file = ""
+        self._last_pct_step = -1
+
+    def set_batch(self, current: int, total: int) -> None:
+        self.batch_current = current
+        self.batch_total = total
+
+    def update(self, copied: int, total: int, current_file: str = "") -> None:
+        self.copied = copied
+        self.total = max(total, 1)
+        self._file = current_file
+        if self._tty:
+            self._draw_tty()
+        else:
+            pct_step = int((copied / self.total) * 10)
+            if pct_step > self._last_pct_step or current_file in {"done", "starting", "moving"}:
+                self._last_pct_step = pct_step
+                self._draw_plain()
+
+    def _prefix(self) -> str:
+        parts = [self.label]
+        if self.batch_current is not None and self.batch_total is not None:
+            parts.append(f"{self.batch_current}/{self.batch_total}")
+        if self.item:
+            parts.append(f"· {self.item}")
+        return " ".join(parts)
+
+    def _short_file(self) -> str:
+        if not self._file or self._file in {"done", "starting", "moving"}:
+            return self._file
+        name = Path(self._file).name
+        if len(name) > 32:
+            return name[:29] + "…"
+        return name
+
+    def _draw_tty(self) -> None:
+        pct = min(1.0, self.copied / self.total)
+        width = 24
+        filled = int(width * pct)
+        bar = "█" * filled + "░" * (width - filled)
+        size = f"{format_bytes(self.copied)}/{format_bytes(self.total)}"
+        line = f"\r{dim(self._prefix())} [{bar}] {size}"
+        short = self._short_file()
+        if short and short not in {"done"}:
+            line += f"  {dim(short)}"
+        sys.stderr.write(line.ljust(96))
+        sys.stderr.flush()
+
+    def _draw_plain(self) -> None:
+        pct = int(min(100, (self.copied / self.total) * 100))
+        msg = f"{self._prefix()}  {pct:>3}%  {format_bytes(self.copied)}/{format_bytes(self.total)}"
+        short = self._short_file()
+        if short:
+            msg += f"  {short}"
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
+
+    def close(self) -> None:
+        if self._tty:
+            sys.stderr.write("\r" + " " * 96 + "\r")
         sys.stderr.flush()
 
 

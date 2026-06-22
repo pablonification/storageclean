@@ -22,6 +22,7 @@ from .operations import (
 from .scanner import format_bytes, scan_workspace, sync_registry
 from .ui import (
     Progress,
+    TransferProgress,
     render_batch_report,
     render_clean_report,
     render_message,
@@ -99,17 +100,24 @@ def cmd_archive(args: argparse.Namespace) -> int:
             )
             scan_prog.close()
 
-            arch_prog = Progress(
-                len(dormant),
-                "Archiving" if not args.dry_run else "Previewing",
-            )
-            report = archive_dormant_projects(
-                config,
-                dry_run=args.dry_run,
-                dormant=dormant,
-                on_progress=lambda i, t, name: arch_prog.update(i, name),
-            )
-            arch_prog.close()
+            if args.dry_run:
+                preview = Progress(len(dormant), "Previewing")
+                report = archive_dormant_projects(
+                    config,
+                    dry_run=True,
+                    dormant=dormant,
+                    on_progress=lambda i, t, name: preview.update(i, name),
+                )
+                preview.close()
+            else:
+                transfer = TransferProgress("Archiving", batch_total=len(dormant))
+                report = archive_dormant_projects(
+                    config,
+                    dry_run=False,
+                    dormant=dormant,
+                    transfer=transfer,
+                )
+                transfer.close()
             render_batch_report(report)
             return 0
 
@@ -117,10 +125,16 @@ def cmd_archive(args: argparse.Namespace) -> int:
             print("Error: provide a project name or use --dormant", file=sys.stderr)
             return 1
 
-        progress = Progress(1, "Archiving" if not args.dry_run else "Previewing")
-        progress.update(1, args.project)
-        result = archive_project(args.project, config, dry_run=args.dry_run)
-        progress.close()
+        label = "Previewing" if args.dry_run else "Archiving"
+        transfer = TransferProgress(label, item=args.project)
+        result = archive_project(
+            args.project,
+            config,
+            dry_run=args.dry_run,
+            transfer=transfer if not args.dry_run else None,
+        )
+        if not args.dry_run:
+            transfer.close()
 
         verb = "Would archive" if args.dry_run else "Archived"
         render_message("ok", f"{verb} {result.name} ({format_bytes(result.size_bytes)})")
@@ -133,10 +147,16 @@ def cmd_archive(args: argparse.Namespace) -> int:
 def cmd_restore(args: argparse.Namespace) -> int:
     config = Config.load()
     try:
-        progress = Progress(1, "Restoring" if not args.dry_run else "Previewing")
-        progress.update(1, args.project)
-        result = restore_project(args.project, config, dry_run=args.dry_run)
-        progress.close()
+        label = "Previewing" if args.dry_run else "Restoring"
+        transfer = TransferProgress(label, item=args.project)
+        result = restore_project(
+            args.project,
+            config,
+            dry_run=args.dry_run,
+            transfer=transfer if not args.dry_run else None,
+        )
+        if not args.dry_run:
+            transfer.close()
         verb = "Would restore" if args.dry_run else "Restored"
         render_message("ok", f"{verb} {result.name} ({format_bytes(result.size_bytes)})")
         return 0
