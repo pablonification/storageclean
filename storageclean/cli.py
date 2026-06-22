@@ -4,7 +4,6 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from datetime import datetime
 
 from . import __version__
 from .config import CACHE_TARGETS, Config, Registry
@@ -15,73 +14,54 @@ from .operations import (
     clean_caches,
     clean_global_caches,
     disk_status,
+    dormant_projects,
     pin_project,
     restore_project,
     unpin_project,
 )
 from .scanner import format_bytes, scan_workspace, sync_registry
-
-
-def _status_icon(info) -> str:
-    if info.protected:
-        return "🔒"
-    if info.pinned:
-        return "📌"
-    if info.is_symlink:
-        return "🔗"
-    if info.dormant:
-        return "💤"
-    return "✅"
+from .ui import (
+    Progress,
+    render_batch_report,
+    render_clean_report,
+    render_message,
+    render_scan_summary,
+    render_status,
+)
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
-    print("Disk usage:")
-    for label, line in disk_status().items():
-        print(f"  {label:14} {line}")
+    render_status(disk_status())
     return 0
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
     config = Config.load()
     registry = Registry()
-    projects = scan_workspace(config, registry)
+
+    entries = []
+    if config.workspace_path.exists():
+        entries = sorted(
+            e.name for e in config.workspace_path.iterdir()
+            if e.is_dir() or e.is_symlink()
+        )
+    progress = Progress(len(entries), "Scanning")
+    projects = scan_workspace(
+        config,
+        registry,
+        on_progress=lambda i, t, name: progress.update(i, name),
+    )
+    progress.close()
 
     if args.sync:
         sync_registry(projects, registry)
 
-    total_size = sum(p.size_bytes for p in projects)
-    total_cache = sum(p.cache_bytes for p in projects)
-
-    print(f"Workspace: {config.workspace_path}")
-    print(f"Projects: {len(projects)} | Total: {format_bytes(total_size)} | Caches: {format_bytes(total_cache)}")
-    print()
-    print(f"{'':2} {'Project':<28} {'Size':>8} {'Cache':>8} {'Inactive':>9}  Status")
-    print("-" * 72)
-
-    for info in sorted(projects, key=lambda p: p.size_bytes, reverse=True):
-        inactive = f"{info.days_inactive}d" if info.days_inactive is not None else "?"
-        status = "archived" if info.is_symlink else ("dormant" if info.dormant else "active")
-        if info.protected:
-            status = "protected"
-        elif info.pinned:
-            status = "pinned"
-        print(
-            f"{_status_icon(info)} {info.name:<28} {format_bytes(info.size_bytes):>8} "
-            f"{format_bytes(info.cache_bytes):>8} {inactive:>9}  {status}"
-        )
-
-    dormant = [p for p in projects if p.dormant and not p.is_symlink and not p.protected]
-    if dormant:
-        print()
-        cli = _cli_name()
-        dormant_size = sum(p.size_bytes for p in dormant)
-        print(
-            f"💤 {len(dormant)} dormant project(s) (>{config.dormant_days}d inactive), "
-            f"{format_bytes(dormant_size)} total:"
-        )
-        print(f"   {cli} archive --dormant --dry-run")
-        print(f"   {cli} clean --dormant --dry-run")
-
+    render_scan_summary(
+        workspace=config.workspace_path,
+        projects=projects,
+        dormant_days=config.dormant_days,
+        cli_name=_cli_name(),
+    )
     return 0
 
 
@@ -106,65 +86,113 @@ def cmd_archive(args: argparse.Namespace) -> int:
     config = Config.load()
     try:
         if args.dormant:
-            logs = archive_dormant_projects(config, dry_run=args.dry_run)
-            for line in logs:
-                print(line)
+            n_entries = 0
+            if config.workspace_path.exists():
+                n_entries = sum(
+                    1 for e in config.workspace_path.iterdir()
+                    if e.is_dir() or e.is_symlink()
+                )
+            scan_prog = Progress(n_entries, "Scanning")
+            dormant = dormant_projects(
+                config,
+                on_progress=lambda i, t, name: scan_prog.update(i, name),
+            )
+            scan_prog.close()
+
+            arch_prog = Progress(
+                len(dormant),
+                "Archiving" if not args.dry_run else "Previewing",
+            )
+            report = archive_dormant_projects(
+                config,
+                dry_run=args.dry_run,
+                dormant=dormant,
+                on_progress=lambda i, t, name: arch_prog.update(i, name),
+            )
+            arch_prog.close()
+            render_batch_report(report)
             return 0
+
         if not args.project:
             print("Error: provide a project name or use --dormant", file=sys.stderr)
             return 1
-        print(archive_project(args.project, config, dry_run=args.dry_run))
+
+        progress = Progress(1, "Archiving" if not args.dry_run else "Previewing")
+        progress.update(1, args.project)
+        result = archive_project(args.project, config, dry_run=args.dry_run)
+        progress.close()
+
+        verb = "Would archive" if args.dry_run else "Archived"
+        render_message("ok", f"{verb} {result.name} ({format_bytes(result.size_bytes)})")
         return 0
     except StorageCleanError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        render_message("err", str(e))
         return 1
 
 
 def cmd_restore(args: argparse.Namespace) -> int:
     config = Config.load()
     try:
-        msg = restore_project(args.project, config, dry_run=args.dry_run)
-        print(msg)
+        progress = Progress(1, "Restoring" if not args.dry_run else "Previewing")
+        progress.update(1, args.project)
+        result = restore_project(args.project, config, dry_run=args.dry_run)
+        progress.close()
+        verb = "Would restore" if args.dry_run else "Restored"
+        render_message("ok", f"{verb} {result.name} ({format_bytes(result.size_bytes)})")
         return 0
     except StorageCleanError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        render_message("err", str(e))
         return 1
 
 
 def cmd_pin(args: argparse.Namespace) -> int:
     config = Config.load()
-    print(pin_project(args.project, config))
+    render_message("ok", pin_project(args.project, config))
     return 0
 
 
 def cmd_unpin(args: argparse.Namespace) -> int:
     config = Config.load()
     try:
-        print(unpin_project(args.project, config))
+        render_message("ok", unpin_project(args.project, config))
         return 0
     except StorageCleanError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        render_message("err", str(e))
         return 1
 
 
 def cmd_clean(args: argparse.Namespace) -> int:
     config = Config.load()
-    projects = args.project if args.project else None
-    targets = args.only if args.only else None
+    label = "Cleaning" if not args.dry_run else "Previewing"
 
     if args.global_caches:
-        logs = clean_global_caches(config, dry_run=args.dry_run)
-    else:
-        logs = clean_caches(
+        progress = Progress(5, label)
+        report = clean_global_caches(
             config,
-            projects=projects,
-            targets=targets,
+            dry_run=args.dry_run,
+            on_progress=lambda i, t, name: progress.update(i, name),
+        )
+        progress.close()
+    else:
+        projects = scan_workspace(config, Registry())
+        if args.project:
+            targets = [p for p in projects if p.name in args.project]
+        elif args.dormant:
+            targets = [p for p in projects if p.dormant and not p.pinned]
+        else:
+            targets = projects
+        progress = Progress(len(targets) or 1, label)
+        report = clean_caches(
+            config,
+            projects=args.project,
+            targets=args.only,
             dormant_only=args.dormant,
             dry_run=args.dry_run,
+            on_progress=lambda i, t, name: progress.update(i, name),
         )
+        progress.close()
 
-    for line in logs:
-        print(line)
+    render_clean_report(report)
     return 0
 
 
@@ -177,11 +205,19 @@ def cmd_config(args: argparse.Namespace) -> int:
     if args.dormant_days:
         config.dormant_days = args.dormant_days
     config.save()
-    print("Config saved:")
-    print(f"  workspace:    {config.workspace}")
-    print(f"  archive:      {config.archive}")
-    print(f"  dormant_days: {config.dormant_days}")
-    print(f"  pinned:       {', '.join(config.pinned) or '(none)'}")
+
+    from .ui import bold, dim, print_table
+    print(bold("Config saved"))
+    print_table(
+        ["Setting", "Value"],
+        [
+            ["workspace", config.workspace],
+            ["archive", config.archive],
+            ["dormant_days", str(config.dormant_days)],
+            ["pinned", ", ".join(config.pinned) or dim("(none)")],
+        ],
+    )
+    print()
     return 0
 
 

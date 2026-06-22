@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from .config import CACHE_TARGETS, Config, ProjectRecord, Registry, is_protected
 
@@ -185,15 +186,24 @@ def scan_project(
     return info
 
 
-def scan_workspace(config: Config, registry: Registry) -> list[ProjectInfo]:
+def scan_workspace(
+    config: Config,
+    registry: Registry,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> list[ProjectInfo]:
     workspace = config.workspace_path
     if not workspace.exists():
         return []
 
+    entries = sorted(
+        e for e in workspace.iterdir() if e.is_dir() or e.is_symlink()
+    )
     projects: list[ProjectInfo] = []
-    for entry in sorted(workspace.iterdir()):
-        if not entry.is_dir() and not entry.is_symlink():
-            continue
+    total = len(entries)
+
+    for i, entry in enumerate(entries, 1):
+        if on_progress:
+            on_progress(i, total, entry.name)
         info = scan_project(entry, config, registry)
         if info:
             projects.append(info)
