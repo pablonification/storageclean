@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export STORAGECLEAN_CLI=sc
+exec python3 -m storageclean "$@"

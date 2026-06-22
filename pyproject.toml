@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "storageclean"
+version = "0.1.0"
+description = "Archive dormant coding projects to SSD and clean rebuildable caches"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.scripts]
+storageclean = "storageclean.cli:main"
+sc = "storageclean.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["storageclean*"]
